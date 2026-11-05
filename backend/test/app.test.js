@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { once } = require('node:events');
+const { randomUUID } = require('node:crypto');
 const app = require('../src/app');
 const documentRepository = require('../src/repositories/documentRepository');
 const localFileRepository = require('../src/repositories/localFileRepository');
@@ -21,6 +22,15 @@ function createStoredDocument(overrides = {}) {
   };
 }
 
+async function startTestServer(t) {
+  const server = app.listen(0, '127.0.0.1');
+  t.after(() => new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  }));
+  await once(server, 'listening');
+  return `http://127.0.0.1:${server.address().port}`;
+}
+
 // Teste de fumaça do seed: garante que o app Express foi exportado.
 // Novos testes serão adicionados durante os Steps 2, 6 e 7 com auxílio do Copilot.
 test('o app backend é exportado', () => {
@@ -29,8 +39,7 @@ test('o app backend é exportado', () => {
 });
 
 test('upload, listagem e download de documentos', async (t) => {
-  const server = app.listen(0);
-  await once(server, 'listening');
+  const baseUrl = await startTestServer(t);
 
   let uploadedId;
   t.after(async () => {
@@ -41,13 +50,8 @@ test('upload, listagem e download de documentos', async (t) => {
         await localFileRepository.remove(document.storageName);
       }
     }
-
-    await new Promise((resolve, reject) => {
-      server.close((error) => (error ? reject(error) : resolve()));
-    });
   });
 
-  const baseUrl = `http://127.0.0.1:${server.address().port}`;
   const missingFileResponse = await fetch(`${baseUrl}/upload`, { method: 'POST' });
   assert.strictEqual(missingFileResponse.status, 400);
   assert.deepStrictEqual(await missingFileResponse.json(), {
@@ -102,6 +106,97 @@ test('upload, listagem e download de documentos', async (t) => {
   });
   assert.strictEqual(oversizedResponse.status, 413);
   assert.strictEqual((await oversizedResponse.json()).error.code, 'FILE_TOO_LARGE');
+});
+
+test('os endpoints respeitam os contratos de upload, listagem e download', async (t) => {
+  const baseUrl = await startTestServer(t);
+
+  await t.test('a listagem vazia retorna um array', async () => {
+    const response = await fetch(`${baseUrl}/documents`);
+    assert.strictEqual(response.status, 200);
+    assert.match(response.headers.get('content-type'), /application\/json/);
+    assert.deepStrictEqual(await response.json(), { documents: [] });
+  });
+
+  for (const invalidUpload of ['campo inesperado', 'mais de um arquivo']) {
+    await t.test(`o upload rejeita ${invalidUpload}`, async () => {
+      const form = new FormData();
+      const field = invalidUpload === 'campo inesperado' ? 'document' : 'file';
+      form.append(field, new Blob(['primeiro']), 'primeiro.txt');
+      if (invalidUpload === 'mais de um arquivo') {
+        form.append('file', new Blob(['segundo']), 'segundo.txt');
+      }
+
+      const response = await fetch(`${baseUrl}/upload`, { method: 'POST', body: form });
+      assert.strictEqual(response.status, 400);
+      assert.strictEqual((await response.json()).error.code, 'UNEXPECTED_FILE');
+      const listResponse = await fetch(`${baseUrl}/documents`);
+      assert.deepStrictEqual(await listResponse.json(), { documents: [] });
+    });
+  }
+
+  await t.test('a listagem ordena documentos e filtra o proprietário', async (t) => {
+    const records = [
+      createStoredDocument({ id: '00000000-0000-4000-8000-000000000003', uploadedAt: '2026-11-04T12:00:00.000Z' }),
+      createStoredDocument({ id: '00000000-0000-4000-8000-000000000002' }),
+      createStoredDocument(),
+      createStoredDocument({ id: '00000000-0000-4000-8000-000000000004', owner: 'other-user' }),
+    ];
+    t.after(() => {
+      for (const record of records) documentRepository.deleteById(record.id);
+    });
+    for (const record of records) documentRepository.save(record);
+
+    const response = await fetch(`${baseUrl}/documents`);
+    assert.strictEqual(response.status, 200);
+    const { documents } = await response.json();
+    assert.deepStrictEqual(documents.map((document) => document.id), [records[2].id, records[1].id, records[0].id]);
+    for (const document of documents) {
+      assert.strictEqual(document.owner, 'local-user');
+      assert.deepStrictEqual(Object.keys(document), ['id', 'originalName', 'size', 'uploadedAt', 'owner']);
+    }
+  });
+
+  for (const content of [Buffer.alloc(0), Buffer.from([0, 255, 128, 13, 10])]) {
+    await t.test(content.length === 0 ? 'aceita arquivo vazio' : 'preserva bytes binários', async (t) => {
+      let uploadedDocument;
+      t.after(async () => {
+        if (!uploadedDocument?.id) return;
+        const stored = documentRepository.findById(uploadedDocument.id);
+        documentRepository.deleteById(uploadedDocument.id);
+        if (stored) await localFileRepository.remove(stored.storageName);
+      });
+      const form = new FormData();
+      form.append('file', new Blob([content]), 'arquivo.bin');
+      const uploadResponse = await fetch(`${baseUrl}/upload`, { method: 'POST', body: form });
+      uploadedDocument = await uploadResponse.json();
+      assert.strictEqual(uploadResponse.status, 201);
+      assert.strictEqual(uploadedDocument.size, content.length);
+      assert.strictEqual(Object.hasOwn(uploadedDocument, 'storageName'), false);
+
+      const downloadResponse = await fetch(`${baseUrl}/documents/${uploadedDocument.id}/download`);
+      assert.strictEqual(downloadResponse.status, 200);
+      assert.match(downloadResponse.headers.get('content-disposition'), /^attachment;/);
+      assert.deepStrictEqual(Buffer.from(await downloadResponse.arrayBuffer()), content);
+    });
+  }
+
+  await t.test('o download retorna 404 quando o arquivo local está ausente', async (t) => {
+    const record = createStoredDocument({ storageName: `${randomUUID()}.bin` });
+    t.after(() => documentRepository.deleteById(record.id));
+    documentRepository.save(record);
+    const response = await fetch(`${baseUrl}/documents/${record.id}/download`);
+    assert.strictEqual(response.status, 404);
+    assert.strictEqual((await response.json()).error.code, 'DOCUMENT_NOT_FOUND');
+  });
+
+  for (const invalidId of ['id-invalido', '../../etc/passwd']) {
+    await t.test(`o download rejeita ${invalidId}`, async () => {
+      const response = await fetch(`${baseUrl}/documents/${encodeURIComponent(invalidId)}/download`);
+      assert.strictEqual(response.status, 404);
+      assert.strictEqual((await response.json()).error.code, 'DOCUMENT_NOT_FOUND');
+    });
+  }
 });
 
 test('o serviço cria metadados e não expõe o nome interno', async () => {
