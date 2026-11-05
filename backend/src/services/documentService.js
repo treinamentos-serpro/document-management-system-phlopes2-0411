@@ -20,26 +20,39 @@ function toPublicDocument(document) {
   };
 }
 
+function createDocumentMetadata(file) {
+  return {
+    id: randomUUID(),
+    originalName: file.originalname,
+    size: file.size,
+    uploadedAt: new Date().toISOString(),
+    owner: DEFAULT_OWNER,
+    storageName: file.filename,
+  };
+}
+
+function compareDocuments(left, right) {
+  const dateOrder = right.uploadedAt.localeCompare(left.uploadedAt);
+  return dateOrder || left.id.localeCompare(right.id);
+}
+
 function createDocumentService({ documentRepository, localFileRepository }) {
+  async function removeUploadedFile(storageName) {
+    try {
+      await localFileRepository.remove(storageName);
+    } catch {
+      // Preserva o erro original; o arquivo poderá exigir limpeza manual.
+    }
+  }
+
   async function createDocument(file) {
-    const document = {
-      id: randomUUID(),
-      originalName: file.originalname,
-      size: file.size,
-      uploadedAt: new Date().toISOString(),
-      owner: DEFAULT_OWNER,
-      storageName: file.filename,
-    };
+    const document = createDocumentMetadata(file);
 
     try {
       documentRepository.save(document);
       return toPublicDocument(document);
     } catch (error) {
-      try {
-        await localFileRepository.remove(file.filename);
-      } catch {
-        // Preserva o erro original; o arquivo poderá exigir limpeza manual.
-      }
+      await removeUploadedFile(file.filename);
 
       throw new DocumentServiceError(
         500,
@@ -52,24 +65,17 @@ function createDocumentService({ documentRepository, localFileRepository }) {
   async function listDocuments() {
     return documentRepository
       .findAllByOwner(DEFAULT_OWNER)
-      .sort((left, right) => {
-        const dateOrder = right.uploadedAt.localeCompare(left.uploadedAt);
-        return dateOrder || left.id.localeCompare(right.id);
-      })
+      .sort(compareDocuments)
       .map(toPublicDocument);
   }
 
   async function getDocumentForDownload(id) {
     const document = documentRepository.findById(id);
-    if (!document || document.owner !== DEFAULT_OWNER) {
-      throw new DocumentServiceError(
-        404,
-        'DOCUMENT_NOT_FOUND',
-        'Documento não encontrado.',
-      );
-    }
-
-    if (!(await localFileRepository.exists(document.storageName))) {
+    if (
+      !document ||
+      document.owner !== DEFAULT_OWNER ||
+      !(await localFileRepository.exists(document.storageName))
+    ) {
       throw new DocumentServiceError(
         404,
         'DOCUMENT_NOT_FOUND',
