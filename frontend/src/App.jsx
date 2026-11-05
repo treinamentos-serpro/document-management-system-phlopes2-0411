@@ -39,11 +39,7 @@ export default function App() {
     };
   }, [reloadToken]);
 
-  function handleUploaded() {
-    setReloadToken((currentToken) => currentToken + 1);
-  }
-
-  function handleRetry() {
+  function reloadDocuments() {
     setReloadToken((currentToken) => currentToken + 1);
   }
 
@@ -75,12 +71,12 @@ export default function App() {
         </section>
 
         <div className="workspace-grid">
-          <UploadComponent onUploaded={handleUploaded} />
+          <UploadComponent onUploaded={reloadDocuments} />
           <DocumentList
             documents={documents}
             isLoading={isLoading}
             error={error}
-            onRetry={handleRetry}
+            onRetry={reloadDocuments}
           />
         </div>
       </main>
