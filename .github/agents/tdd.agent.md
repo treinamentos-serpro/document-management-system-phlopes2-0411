@@ -3,7 +3,7 @@ description: Agente de TDD que escreve testes antes da implementação seguindo 
 name: tdd
 tools: ['search', 'codebase', 'usages', 'runTests', 'editFiles']
 handoffs:
-  - label: Implementar para passar nos testes
+  - label: Implementar isso para passar nos testes
     agent: agent
     prompt: Implemente o código mínimo necessário para os testes acima passarem, sem alterar os testes.
     send: false
